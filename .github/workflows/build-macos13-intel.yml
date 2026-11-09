@@ -337,12 +337,26 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Resolve dependencies (pinned versions only)
+      - name: Resolve dependencies (pinned versions only, with retries)
+        # SwiftPM sometimes fails with "already exists in file system" when it downloads the
+        # same audio library twice at the same moment. A retry normally succeeds.
         run: |
-          xcodebuild -resolvePackageDependencies \
-            -project Moonlight.xcodeproj \
-            -scheme Moonlight \
-            -onlyUsePackageVersionsFromResolvedFile
+          for attempt in 1 2 3 4; do
+            echo "=== Attempt $attempt ==="
+            if xcodebuild -resolvePackageDependencies \
+                 -project Moonlight.xcodeproj \
+                 -scheme Moonlight \
+                 -clonedSourcePackagesDirPath build/SourcePackages \
+                 -onlyUsePackageVersionsFromResolvedFile; then
+              echo "Dependencies resolved."
+              exit 0
+            fi
+            echo "Failed; cleaning partial downloads and retrying..."
+            rm -rf ~/Library/Caches/org.swift.swiftpm/artifacts
+            sleep 10
+          done
+          echo "::error::Could not resolve dependencies after 4 attempts."
+          exit 1
 
       - name: Build (Intel, Release)
         run: |
@@ -353,6 +367,8 @@ jobs:
             -configuration Release \
             -destination "platform=macOS,arch=x86_64" \
             -derivedDataPath build \
+            -clonedSourcePackagesDirPath build/SourcePackages \
+            -disableAutomaticPackageResolution \
             ARCHS=x86_64 ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             > build.log 2>&1
@@ -361,7 +377,7 @@ jobs:
         if: failure()
         run: |
           echo "===== ALL ERRORS (copy everything below) ====="
-          grep -E "error:" build.log | sort -u | head -100
+          grep -E "error:" build.log 2>/dev/null | sort -u | head -100 || true
           echo "===== END ====="
 
       - name: Check the app really runs on macOS 13
