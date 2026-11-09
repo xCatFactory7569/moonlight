@@ -49,6 +49,7 @@ jobs:
           // added in macOS 14: the two-value `onChange` and `ContentUnavailableView`. This file
           // provides equivalents built only from macOS 13 features.
 
+          import AppKit
           import SwiftUI
 
           // MARK: - onChange
@@ -99,6 +100,28 @@ jobs:
                   _ action: @escaping () -> Void
               ) -> some View {
                   modifier(OnChangeCompatModifier(value: value, initial: initial) { _, _ in action() })
+              }
+          }
+
+          // MARK: - openSettings
+
+          // The `openSettings` environment action is macOS 14+. On macOS 13 the Settings
+          // window is opened by sending the standard menu action.
+          struct OpenSettingsCompat {
+              func callAsFunction() {
+                  NSApp.activate(ignoringOtherApps: true)
+                  NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+              }
+          }
+
+          private struct OpenSettingsCompatKey: EnvironmentKey {
+              static let defaultValue = OpenSettingsCompat()
+          }
+
+          extension EnvironmentValues {
+              var openSettingsCompat: OpenSettingsCompat {
+                  get { self[OpenSettingsCompatKey.self] }
+                  set { self[OpenSettingsCompatKey.self] = newValue }
               }
           }
 
@@ -190,6 +213,17 @@ jobs:
             | xargs sed -i '' 's/\.onChange(of:/.onChangeCompat(of:/g'
           echo "Files changed:"; git status --short
 
+      - name: Patch other macOS 14 / 13.3 APIs
+        run: |
+          # openSettings (macOS 14) -> compat helper
+          sed -i '' 's/(\\\.openSettings)/(\\.openSettingsCompat)/' \
+            Sources/App/MoonlightCommands.swift Sources/UI/Transport/TransportBarView.swift
+          # volumeTypeName (macOS 13.3) -> only use it when available, else fall back to statfs
+          sed -i '' 's/if let type = (try? url.resourceValues(forKeys: \[.volumeTypeNameKey\]))?.volumeTypeName {/if #available(macOS 13.3, iOS 16.4, *), let type = (try? url.resourceValues(forKeys: [.volumeTypeNameKey]))?.volumeTypeName {/' \
+            Sources/Scanner/PortableIdentity.swift
+          grep -n "openSettings" Sources/App/MoonlightCommands.swift Sources/UI/Transport/TransportBarView.swift
+          grep -n "volumeTypeName" Sources/Scanner/PortableIdentity.swift
+
       - name: Generate Xcode project
         run: xcodegen generate
 
@@ -211,7 +245,14 @@ jobs:
             -derivedDataPath build \
             ARCHS=x86_64 ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            2>&1 | tee build.log | tail -n 60
+            > build.log 2>&1
+
+      - name: Show build errors
+        if: failure()
+        run: |
+          echo "===== ALL ERRORS (copy everything below) ====="
+          grep -E "error:" build.log | sort -u | head -100
+          echo "===== END ====="
 
       - name: Check the app really runs on macOS 13
         run: |
