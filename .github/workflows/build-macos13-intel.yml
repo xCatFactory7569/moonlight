@@ -223,6 +223,116 @@ jobs:
             Sources/Scanner/PortableIdentity.swift
           grep -n "openSettings" Sources/App/MoonlightCommands.swift Sources/UI/Transport/TransportBarView.swift
           grep -n "volumeTypeName" Sources/Scanner/PortableIdentity.swift
+          # Same macOS 13.3 issue in FolderBookmarkStore: fall back to the existing statfs check
+          perl -pi -e 's/^        \(try\? url\.resourceValues\(forKeys: \[\.volumeTypeNameKey\]\)\)\?\.volumeTypeName\?\.lowercased\(\)$/        if #available(macOS 13.3, iOS 16.4, *) { return (try? url.resourceValues(forKeys: [.volumeTypeNameKey]))?.volumeTypeName?.lowercased() }\n        return PortableIdentityFilesystemPolicy.filesystemType(for: url)/' \
+            Sources/Scanner/FolderBookmarkStore.swift
+          grep -n -B1 -A3 "volumeTypeName" Sources/Scanner/FolderBookmarkStore.swift
+          # ArtworkView: give the compiler the type it fails to infer on the macOS 13 target
+          sed -i '' 's/let loadedImage = await Task.detached(priority: .userInitiated) {/let loadedImage: NSImage? = await Task.detached(priority: .userInitiated) {/' \
+            Sources/UI/Views/ArtworkView.swift
+          grep -n "let loadedImage" Sources/UI/Views/ArtworkView.swift
+
+      - name: Replace iCloud sync with an "off" version (needs macOS 14 and a paid Apple account)
+        run: |
+          cat > Sources/Database/CloudKitSyncCoordinator.swift <<'SWIFT'
+          // CloudKitSyncCoordinator.swift
+          //
+          // macOS 13 build: iCloud sync needs CKSyncEngine (macOS 14+) and a signed build with iCloud
+          // enabled, so on this build sync is simply switched off. Everything else is unchanged.
+
+          import Combine
+          import Foundation
+
+          enum CloudSyncProblem: String, Sendable {
+              case notSignedIn = "Not signed into iCloud"
+              case accountChanged = "iCloud account changed"
+              case quotaExceeded = "iCloud storage quota exceeded"
+              case zoneDeleted = "Moonlight's iCloud zone was deleted"
+              case networkUnavailable = "Network unavailable"
+              case throttled = "iCloud is temporarily throttling sync"
+              case schemaTooNew = "Some data requires a newer Moonlight version"
+              case changeTokenExpired = "A complete iCloud refresh is required"
+              case fetchedBatchRejected = "Downloaded changes require sync recovery"
+              case unknown = "Unable to sync"
+          }
+
+          final class CloudSyncStatus: ObservableObject {
+              @Published var isEnabled = false
+              @Published var isSyncing = false
+              @Published var pendingChangeCount = 0
+              @Published var lastSuccessfulSync: Date?
+              @Published var problem: CloudSyncProblem?
+              @Published var details: String?
+              @Published var requiresFullResync = false
+              @Published var lastProtected: Date?
+              @Published var protectionProblem: String?
+              /// A status must describe the actual sync state, not merely the absence of
+              /// an error. In particular, a disabled sync service is never "up to date."
+              var headline: String {
+                  guard isEnabled else { return "iCloud Sync is Off" }
+                  if let problem { return problem.rawValue }
+                  if isSyncing { return lastSuccessfulSync == nil ? "Connecting to iCloud…" : "Syncing…" }
+                  if pendingChangeCount > 0 { return "Changes ready to sync" }
+                  return lastSuccessfulSync == nil ? "Ready to sync" : "Up to date"
+              }
+
+              var explanation: String {
+                  guard isEnabled else {
+                      return "Moonlight keeps everything on this Mac until you choose to turn on iCloud Sync."
+                  }
+                  if let details { return details }
+                  if isSyncing { return "Checking your private iCloud metadata." }
+                  if pendingChangeCount > 0 { return "\(pendingChangeCount) local change\(pendingChangeCount == 1 ? "" : "s") will upload when iCloud is available." }
+                  if lastSuccessfulSync != nil { return "Your synchronized metadata matches the latest iCloud copy." }
+                  return "Ready to make the first private iCloud copy of your metadata."
+              }
+          }
+
+          /// A deliberately narrow signal for changes that have been committed to the
+          /// synchronized library state. This is separate from `CloudSyncStatus`: status
+          /// updates describe transport activity, while this signal means read models may
+          /// now be stale.
+          final class SynchronizedLibraryChangeNotifier: ObservableObject {
+              @Published private(set) var generation = 0
+
+              func noteCommittedChange() {
+                  generation &+= 1
+              }
+          }
+
+          final class CloudKitSyncCoordinator: NSObject, @unchecked Sendable {
+              static let containerIdentifier = "iCloud.com.musopen.moonlight"
+              static let zoneName = "MoonlightMetadata"
+              static let schemaVersion = 1
+
+              let status = CloudSyncStatus()
+              let synchronizedLibraryChanges = SynchronizedLibraryChangeNotifier()
+              private let manager: DatabaseManager
+
+              init(manager: DatabaseManager) {
+                  self.manager = manager
+                  super.init()
+              }
+
+              func start() async {}
+
+              func setEnabled(_ enabled: Bool) async {
+                  await MainActor.run {
+                      status.isEnabled = false
+                      status.details = enabled ? "iCloud Sync is not available in this macOS 13 build." : nil
+                  }
+              }
+
+              func synchronize(force: Bool = true) async {}
+              func handleRemoteNotification(_ userInfo: [AnyHashable: Any]) async -> Bool { false }
+              func flushForLifecycleTransition() async {}
+              func recoverKeepingLocalState() async {}
+              func recoverUsingCloudState() async {}
+              func performFullRefetch() async {}
+              func noteSynchronizedStateReplacement() async {}
+          }
+          SWIFT
+          head -8 Sources/Database/CloudKitSyncCoordinator.swift
 
       - name: Generate Xcode project
         run: xcodegen generate
