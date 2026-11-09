@@ -334,6 +334,19 @@ jobs:
           SWIFT
           head -8 Sources/Database/CloudKitSyncCoordinator.swift
 
+      - name: Use custom app icon (only if Config/moonlight-icon-1024.png exists)
+        run: |
+          SRC=Config/moonlight-icon-1024.png
+          if [ -f "$SRC" ]; then
+            SET=Sources/Assets.xcassets/AppIcon.appiconset
+            for n in 16 32 64 128 256 512 1024; do
+              sips -z $n $n "$SRC" --out "$SET/icon_${n}x${n}.png" > /dev/null
+            done
+            echo "Custom icon applied."
+          else
+            echo "No custom icon found; using the default icon."
+          fi
+
       - name: Generate Xcode project
         run: xcodegen generate
 
