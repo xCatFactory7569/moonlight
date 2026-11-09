@@ -227,6 +227,26 @@ jobs:
           perl -pi -e 's/^        \(try\? url\.resourceValues\(forKeys: \[\.volumeTypeNameKey\]\)\)\?\.volumeTypeName\?\.lowercased\(\)$/        if #available(macOS 13.3, iOS 16.4, *) { return (try? url.resourceValues(forKeys: [.volumeTypeNameKey]))?.volumeTypeName?.lowercased() }\n        return PortableIdentityFilesystemPolicy.filesystemType(for: url)/' \
             Sources/Scanner/FolderBookmarkStore.swift
           grep -n -B1 -A3 "volumeTypeName" Sources/Scanner/FolderBookmarkStore.swift
+          # Traffic lights cut off on macOS 13: the title bar clips the moved buttons
+          python3 - <<'PY'
+          p = 'Sources/UI/Transport/MiniPlayerView.swift'
+          s = open(p).read()
+          marker = "        for button in buttons {\n            let offsetFromClose"
+          assert s.count(marker) == 1, "marker not found"
+          block = """if #unavailable(macOS 14) {
+                      // macOS 13 clips the title bar to its default height, which cuts off the moved buttons.
+                      let frameView = window.contentView?.superview
+                      var ancestor: NSView? = superview
+                      while let view = ancestor, view !== frameView {
+                          view.wantsLayer = true
+                          view.layer?.masksToBounds = false
+                          ancestor = view.superview
+                      }
+                  }
+          
+          """
+          open(p, 'w').write(s.replace(marker, block + marker))
+          PY
           # ArtworkView: give the compiler the type it fails to infer on the macOS 13 target
           sed -i '' 's/let loadedImage = await Task.detached(priority: .userInitiated) {/let loadedImage: NSImage? = await Task.detached(priority: .userInitiated) {/' \
             Sources/UI/Views/ArtworkView.swift
