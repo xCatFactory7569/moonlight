@@ -1,0 +1,268 @@
+name: Build Moonlight for macOS 13 (Intel)
+
+# Run it by hand: Actions tab -> "Build Moonlight for macOS 13 (Intel)" -> Run workflow.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select newest Xcode 26
+        # Moonlight's metadata package needs Swift tools 6.2, i.e. Xcode 26+.
+        run: |
+          echo "Xcode versions on this runner:"
+          ls -d /Applications/Xcode*.app
+          XC=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | grep -v -i beta | sort -V | tail -1)
+          if [ -z "$XC" ]; then
+            echo "::error::No Xcode 26 on this runner. Change 'runs-on' to macos-26-intel and run again."
+            exit 1
+          fi
+          echo "Using $XC"
+          sudo xcode-select -s "$XC/Contents/Developer"
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Lower the macOS requirement from 14.0 to 13.0
+        run: |
+          sed -i '' 's/"14\.0"/"13.0"/g' project.yml
+          echo "--- macOS version lines in project.yml now:"
+          grep -n '13\.0\|14\.0' project.yml
+
+      - name: Add macOS 13 compatibility helpers
+        run: |
+          cat > Sources/App/MacOS13Compat.swift <<'SWIFT'
+          // MacOS13Compat.swift
+          //
+          // Lets Moonlight run on macOS 13 Ventura. Two SwiftUI features Moonlight uses were
+          // added in macOS 14: the two-value `onChange` and `ContentUnavailableView`. This file
+          // provides equivalents built only from macOS 13 features.
+
+          import SwiftUI
+
+          // MARK: - onChange
+
+          private struct OnChangeCompatModifier<V: Equatable>: ViewModifier {
+              let value: V
+              let initial: Bool
+              let action: (V, V) -> Void
+              @State private var previous: V
+
+              init(value: V, initial: Bool, action: @escaping (V, V) -> Void) {
+                  self.value = value
+                  self.initial = initial
+                  self.action = action
+                  _previous = State(initialValue: value)
+              }
+
+              func body(content: Content) -> some View {
+                  content
+                      .onChange(of: value) { newValue in
+                          let oldValue = previous
+                          previous = newValue
+                          action(oldValue, newValue)
+                      }
+                      .onAppear {
+                          if initial { action(value, value) }
+                      }
+              }
+          }
+
+          extension View {
+              func onChangeCompat<V: Equatable>(
+                  of value: V, initial: Bool = false,
+                  _ action: @escaping (_ oldValue: V, _ newValue: V) -> Void
+              ) -> some View {
+                  modifier(OnChangeCompatModifier(value: value, initial: initial, action: action))
+              }
+
+              func onChangeCompat<V: Equatable>(
+                  of value: V, initial: Bool = false,
+                  _ action: @escaping (_ newValue: V) -> Void
+              ) -> some View {
+                  modifier(OnChangeCompatModifier(value: value, initial: initial) { _, new in action(new) })
+              }
+
+              func onChangeCompat<V: Equatable>(
+                  of value: V, initial: Bool = false,
+                  _ action: @escaping () -> Void
+              ) -> some View {
+                  modifier(OnChangeCompatModifier(value: value, initial: initial) { _, _ in action() })
+              }
+          }
+
+          // MARK: - ContentUnavailableView
+
+          // Declared in the app's own module, so it is used instead of the macOS 14 system version.
+          struct ContentUnavailableView<Label: View, Description: View, Actions: View>: View {
+              private let label: Label
+              private let descriptionView: Description
+              private let actions: Actions
+
+              init(
+                  @ViewBuilder label: () -> Label,
+                  @ViewBuilder description: () -> Description,
+                  @ViewBuilder actions: () -> Actions
+              ) {
+                  self.label = label()
+                  self.descriptionView = description()
+                  self.actions = actions()
+              }
+
+              var body: some View {
+                  VStack(spacing: 10) {
+                      label.labelStyle(CompatUnavailableLabelStyle())
+                      descriptionView
+                          .font(.callout)
+                          .foregroundStyle(.secondary)
+                          .multilineTextAlignment(.center)
+                      actions
+                  }
+                  .padding(24)
+                  .frame(maxWidth: .infinity, maxHeight: .infinity)
+              }
+          }
+
+          extension ContentUnavailableView where Description == EmptyView, Actions == EmptyView {
+              init(@ViewBuilder label: () -> Label) {
+                  self.init(label: label, description: { EmptyView() }, actions: { EmptyView() })
+              }
+          }
+
+          extension ContentUnavailableView where Actions == EmptyView {
+              init(@ViewBuilder label: () -> Label, @ViewBuilder description: () -> Description) {
+                  self.init(label: label, description: description, actions: { EmptyView() })
+              }
+          }
+
+          extension ContentUnavailableView
+          where Label == SwiftUI.Label<Text, Image>, Description == EmptyView, Actions == EmptyView {
+              init(_ title: LocalizedStringKey, systemImage name: String) {
+                  self.init(
+                      label: { SwiftUI.Label(title, systemImage: name) },
+                      description: { EmptyView() },
+                      actions: { EmptyView() }
+                  )
+              }
+          }
+
+          extension ContentUnavailableView
+          where Label == SwiftUI.Label<Text, Image>, Description == Text, Actions == EmptyView {
+              init(_ title: LocalizedStringKey, systemImage name: String, description: Text) {
+                  self.init(
+                      label: { SwiftUI.Label(title, systemImage: name) },
+                      description: { description },
+                      actions: { EmptyView() }
+                  )
+              }
+          }
+
+          private struct CompatUnavailableLabelStyle: LabelStyle {
+              func makeBody(configuration: Configuration) -> some View {
+                  VStack(spacing: 8) {
+                      configuration.icon
+                          .font(.system(size: 42))
+                          .foregroundStyle(.secondary)
+                      configuration.title
+                          .font(.title2.weight(.semibold))
+                  }
+              }
+          }
+          SWIFT
+          head -5 Sources/App/MacOS13Compat.swift
+
+      - name: Use the compatible onChange in the Mac app code
+        run: |
+          grep -rl '\.onChange(of:' Sources --include=*.swift \
+            | grep -v '^Sources/Mobile/' \
+            | grep -v 'MacOS13Compat.swift' \
+            | xargs sed -i '' 's/\.onChange(of:/.onChangeCompat(of:/g'
+          echo "Files changed:"; git status --short
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Resolve dependencies (pinned versions only)
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project Moonlight.xcodeproj \
+            -scheme Moonlight \
+            -onlyUsePackageVersionsFromResolvedFile
+
+      - name: Build (Intel, Release)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project Moonlight.xcodeproj \
+            -scheme Moonlight \
+            -configuration Release \
+            -destination "platform=macOS,arch=x86_64" \
+            -derivedDataPath build \
+            ARCHS=x86_64 ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee build.log | tail -n 60
+
+      - name: Check the app really runs on macOS 13
+        run: |
+          APP="build/Build/Products/Release/Moonlight.app"
+          BIN="$APP/Contents/MacOS/Moonlight"
+          lipo -info "$BIN"
+          vtool -show-build "$BIN"
+          MINOS=$(vtool -show-build "$BIN" | awk '/minos/ {print $2; exit}')
+          echo "Minimum macOS: $MINOS"
+          MAJOR=${MINOS%%.*}
+          if [ "$MAJOR" -gt 13 ]; then
+            echo "::error::App still requires macOS $MINOS"
+            exit 1
+          fi
+
+      - name: Sign for local use (no Apple account needed)
+        run: |
+          cat > local.entitlements <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>com.apple.security.app-sandbox</key><true/>
+              <key>com.apple.security.files.user-selected.read-write</key><true/>
+              <key>com.apple.security.network.client</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          APP="build/Build/Products/Release/Moonlight.app"
+          codesign --force --deep --sign - --timestamp=none \
+            --entitlements local.entitlements "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -d --entitlements - "$APP"
+
+      - name: Package
+        run: |
+          mkdir dist
+          ditto -c -k --keepParent build/Build/Products/Release/Moonlight.app dist/Moonlight-macOS13-intel.zip
+          ls -lh dist
+
+      - name: Upload app
+        uses: actions/upload-artifact@v4
+        with:
+          name: Moonlight-macOS13-intel
+          path: dist/Moonlight-macOS13-intel.zip
+          retention-days: 30
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          retention-days: 7
