@@ -367,6 +367,66 @@ jobs:
             echo "No custom icon found; using the default icon."
           fi
 
+      - name: Add the right-side Inspector panel (only if the panel file is present)
+        run: |
+          if [ ! -f Sources/UI/Inspector/InspectorPanel.swift ]; then
+            echo "Inspector panel file not found; building without the right-side panel."
+            exit 0
+          fi
+          python3 - <<'PY'
+          def patch(path, old, new):
+              s = open(path).read()
+              assert s.count(old) == 1, "%s: anchor found %d times: %r" % (path, s.count(old), old[:70])
+              open(path, 'w').write(s.replace(old, new))
+
+          # Main window: show the panel to the right of the content
+          cv = 'Sources/App/ContentView.swift'
+          patch(cv,
+              "    @State private var isFolderDropTargeted = false\n",
+              "    @State private var isFolderDropTargeted = false\n"
+              "    @AppStorage(\"inspectorVisible\") private var inspectorVisible = false\n")
+          patch(cv,
+              "            .ignoresSafeArea(.all, edges: .top)\n"
+              "            .frame(maxWidth: .infinity, maxHeight: .infinity)\n"
+              "        }\n"
+              "        .overlay {",
+              "            .ignoresSafeArea(.all, edges: .top)\n"
+              "            .frame(maxWidth: .infinity, maxHeight: .infinity)\n"
+              "\n"
+              "            if inspectorVisible && appState.selectedSidebarItem != .nowPlaying {\n"
+              "                InspectorPanel(controller: appState.playbackController)\n"
+              "                    .frame(width: 320)\n"
+              "                    .transition(.move(edge: .trailing))\n"
+              "            }\n"
+              "        }\n"
+              "        .overlay {")
+          patch(cv,
+              "        .animation(.easeInOut(duration: 0.18), value: appState.isSidebarCollapsed)\n",
+              "        .animation(.easeInOut(duration: 0.18), value: appState.isSidebarCollapsed)\n"
+              "        .animation(.easeInOut(duration: 0.18), value: inspectorVisible)\n")
+
+          # Transport bar: a button to show or hide the panel
+          tb = 'Sources/UI/Transport/TransportBarView.swift'
+          patch(tb,
+              "    @State private var isQueuePresented = false\n",
+              "    @State private var isQueuePresented = false\n"
+              "    @AppStorage(\"inspectorVisible\") private var inspectorVisible = false\n")
+          patch(tb,
+              "                    Spacer().frame(width: 2)\n"
+              "                    VolumeSliderView()\n",
+              "                    TransportIconButton(icon: \"sidebar.right\", isActive: inspectorVisible, action: {\n"
+              "                        inspectorVisible.toggle()\n"
+              "                    })\n"
+              "                    .help(\"Show Inspector\")\n"
+              "                    Spacer().frame(width: 2)\n"
+              "                    VolumeSliderView()\n")
+          patch(tb, "                .frame(width: 330, alignment: .trailing)\n",
+                    "                .frame(width: 364, alignment: .trailing)\n")
+          patch(tb, "                    .frame(width: 330)\n",
+                    "                    .frame(width: 364)\n")
+          print("Inspector panel hooked in.")
+          PY
+
       - name: Generate Xcode project
         run: xcodegen generate
 
