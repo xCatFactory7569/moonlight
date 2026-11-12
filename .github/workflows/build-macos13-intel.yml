@@ -427,6 +427,28 @@ jobs:
           print("Inspector panel hooked in.")
           PY
 
+      - name: Graphite palette (dark gray with black accents) for the Moonlight theme
+        run: |
+          python3 - <<'PY'
+          path = 'Sources/UI/DesignSystem.swift'
+          s = open(path).read()
+          old = (
+              '                bgBase: "#1f2329", bgContent: "#282c34", bgSidebar: "#21252b", bgSidebarOpacity: 0.72,\n'
+              '                bgElevated: "#303640", bgElevated2: "#3b4250", bgChrome: "#2c313a", transportOpacity: 0.76,\n'
+              '                hover: "#61afef", selected: "#61afef", accent: "#61afef", accentStrong: "#528bff",\n'
+              '                borderSoft: "#abb2bf", borderMedium: "#abb2bf", borderStrong: "#c8ccd4"\n'
+          )
+          new = (
+              '                bgBase: "#0e0e0f", bgContent: "#242426", bgSidebar: "#1a1a1c", bgSidebarOpacity: 0.72,\n'
+              '                bgElevated: "#303033", bgElevated2: "#3b3b3f", bgChrome: "#111112", transportOpacity: 0.86,\n'
+              '                hover: "#61afef", selected: "#61afef", accent: "#61afef", accentStrong: "#528bff",\n'
+              '                borderSoft: "#c4c4c9", borderMedium: "#c4c4c9", borderStrong: "#dcdce0"\n'
+          )
+          assert s.count(old) == 1, "Moonlight palette not found (%d)" % s.count(old)
+          open(path, 'w').write(s.replace(old, new))
+          print("Graphite palette applied to the Moonlight theme.")
+          PY
+
       - name: Generate Xcode project
         run: xcodegen generate
 
