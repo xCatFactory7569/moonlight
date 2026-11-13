@@ -493,6 +493,213 @@ jobs:
           print("Graphite palette applied.")
           PY
 
+      - name: Remove the Discover / Live Radio section from the sidebar
+        run: |
+          python3 - <<'PY'
+          path = 'Sources/UI/Sidebar/SidebarView.swift'
+          s = open(path).read()
+          old = "                    librarySection\n                    discoverySection\n                    playlistSection\n"
+          new = "                    librarySection\n                    playlistSection\n"
+          assert s.count(old) == 1, "sidebar anchor not found"
+          open(path, 'w').write(s.replace(old, new))
+          print("Discover / Live Radio removed from the sidebar.")
+          PY
+
+      - name: Add lyrics to the Now Playing screen (only if the lyrics file is present)
+        run: |
+          if [ ! -f Sources/UI/Lyrics/LyricsPanel.swift ]; then
+            echo "Lyrics panel file not found; building without lyrics."
+            exit 0
+          fi
+          python3 - <<'PY'
+          def patch(path, old, new):
+              s = open(path).read()
+              assert s.count(old) == 1, "%s: anchor found %d times: %r" % (path, s.count(old), old[:70])
+              open(path, 'w').write(s.replace(old, new))
+
+          np = 'Sources/UI/Overlays/NowPlayingView.swift'
+
+          patch(np,
+              "    @State private var isQueueExpanded = false\n",
+              "    @State private var isQueueExpanded = false\n"
+              "    @AppStorage(\"nowPlayingLyrics\") private var showsLyrics = false\n")
+
+          patch(np,
+              "                if let track = currentTrack {\n"
+              "                    ScrollView {\n"
+              "                        nowPlayingContent(for: track, size: proxy.size)\n"
+              "                            .frame(maxWidth: .infinity)\n"
+              "                            .frame(minHeight: proxy.size.height)\n"
+              "                    }\n"
+              "                    .scrollIndicators(.hidden)\n",
+              "                if let track = currentTrack {\n"
+              "                    HStack(spacing: 0) {\n"
+              "                        ScrollView {\n"
+              "                            nowPlayingContent(\n"
+              "                                for: track,\n"
+              "                                size: CGSize(width: showsLyrics ? proxy.size.width * 0.5 : proxy.size.width, height: proxy.size.height)\n"
+              "                            )\n"
+              "                            .frame(maxWidth: .infinity)\n"
+              "                            .frame(minHeight: proxy.size.height)\n"
+              "                        }\n"
+              "                        .scrollIndicators(.hidden)\n"
+              "\n"
+              "                        if showsLyrics {\n"
+              "                            LyricsPanel(track: track, controller: controller)\n"
+              "                                .frame(width: proxy.size.width * 0.5)\n"
+              "                        }\n"
+              "                    }\n"
+              "                    .animation(.easeInOut(duration: 0.25), value: showsLyrics)\n")
+
+          patch(np,
+              "            NowPlayingSceneMenu()\n"
+              "        }\n"
+              "        .padding(.horizontal, 10)\n",
+              "            if currentRadioStation == nil {\n"
+              "                NowPlayingChromeButton(\n"
+              "                    icon: showsLyrics ? \"quote.bubble.fill\" : \"quote.bubble\",\n"
+              "                    help: showsLyrics ? \"Hide Lyrics\" : \"Show Lyrics\"\n"
+              "                ) {\n"
+              "                    showsLyrics.toggle()\n"
+              "                }\n"
+              "            }\n"
+              "\n"
+              "            NowPlayingSceneMenu()\n"
+              "        }\n"
+              "        .padding(.horizontal, 10)\n")
+          print("Lyrics hooked into Now Playing.")
+          PY
+
+      - name: Last.fm - enter your own keys inside the app (kept in the Keychain, never on GitHub)
+        run: |
+          mkdir -p Sources/LastFM
+          cat > Sources/LastFM/LastFMLocalKeys.swift <<'SWIFT'
+          // LastFMLocalKeys.swift
+          //
+          // Lets you type your own Last.fm API key and shared secret into Settings. They are saved only in
+          // this Mac's Keychain, so they never have to be part of the app file or stored on GitHub.
+
+          import SwiftUI
+          import Security
+
+          enum LastFMLocalKeys {
+              private static let service = "Moonlight Last.fm API keys"
+              private static let account = "api-credentials"
+
+              static func load() -> (apiKey: String, secret: String)? {
+                  let query: [String: Any] = [
+                      kSecClass as String: kSecClassGenericPassword,
+                      kSecAttrService as String: service,
+                      kSecAttrAccount as String: account,
+                      kSecReturnData as String: true,
+                      kSecMatchLimit as String: kSecMatchLimitOne
+                  ]
+                  var result: CFTypeRef?
+                  guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+                        let data = result as? Data,
+                        let text = String(data: data, encoding: .utf8)
+                  else { return nil }
+                  let parts = text.components(separatedBy: "\n")
+                  guard parts.count >= 2, !parts[0].isEmpty, !parts[1].isEmpty else { return nil }
+                  return (parts[0], parts[1])
+              }
+
+              static func save(apiKey: String, secret: String) -> Bool {
+                  let base: [String: Any] = [
+                      kSecClass as String: kSecClassGenericPassword,
+                      kSecAttrService as String: service,
+                      kSecAttrAccount as String: account
+                  ]
+                  SecItemDelete(base as CFDictionary)
+                  var item = base
+                  item[kSecValueData as String] = Data("\(apiKey)\n\(secret)".utf8)
+                  return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
+              }
+          }
+
+          struct LastFMKeyEntryView: View {
+              @State private var apiKey = ""
+              @State private var secret = ""
+              @State private var didSave = false
+              @State private var didFail = false
+
+              var body: some View {
+                  VStack(alignment: .leading, spacing: 8) {
+                      Text("Add your own Last.fm keys")
+                          .font(.system(size: 12, weight: .semibold))
+                          .foregroundColor(Color.textPrimary)
+                      Text("Create a free key at last.fm/api/account/create. Both values are stored only in this Mac's Keychain.")
+                          .font(.system(size: 11))
+                          .foregroundColor(Color.textSecondary)
+                          .fixedSize(horizontal: false, vertical: true)
+                      Link("Open the Last.fm API page", destination: URL(string: "https://www.last.fm/api/account/create")!)
+                          .font(.system(size: 11))
+                      TextField("API key", text: $apiKey)
+                          .textFieldStyle(.roundedBorder)
+                      SecureField("Shared secret", text: $secret)
+                          .textFieldStyle(.roundedBorder)
+                      HStack(spacing: 10) {
+                          Button("Save keys") {
+                              let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                              let value = secret.trimmingCharacters(in: .whitespacesAndNewlines)
+                              didFail = !LastFMLocalKeys.save(apiKey: key, secret: value)
+                              didSave = !didFail
+                          }
+                          .disabled(apiKey.trimmingCharacters(in: .whitespaces).isEmpty
+                                    || secret.trimmingCharacters(in: .whitespaces).isEmpty)
+                          if didSave {
+                              Text("Saved. Quit and reopen Moonlight to turn on Last.fm.")
+                                  .font(.system(size: 11))
+                                  .foregroundColor(Color.textSecondary)
+                          }
+                          if didFail {
+                              Text("Could not save to the Keychain.")
+                                  .font(.system(size: 11))
+                                  .foregroundColor(Color.orange)
+                          }
+                      }
+                  }
+                  .padding(.top, 4)
+              }
+          }
+          SWIFT
+          python3 - <<'PY'
+          def patch(path, old, new):
+              s = open(path).read()
+              assert s.count(old) == 1, "%s: anchor found %d times: %r" % (path, s.count(old), old[:70])
+              open(path, 'w').write(s.replace(old, new))
+
+          # If the app was built without keys, use the ones saved in the Keychain
+          patch('Sources/LastFM/LastFMConfiguration.swift',
+              "    static func bundled(in bundle: Bundle = .main) -> LastFMConfiguration {\n"
+              "        LastFMConfiguration(\n"
+              "            apiKey: bundle.object(forInfoDictionaryKey: \"LastFMAPIKey\") as? String ?? \"\",\n"
+              "            sharedSecret: bundle.object(forInfoDictionaryKey: \"LastFMSharedSecret\") as? String ?? \"\"\n"
+              "        )\n"
+              "    }\n",
+              "    static func bundled(in bundle: Bundle = .main) -> LastFMConfiguration {\n"
+              "        let built = LastFMConfiguration(\n"
+              "            apiKey: bundle.object(forInfoDictionaryKey: \"LastFMAPIKey\") as? String ?? \"\",\n"
+              "            sharedSecret: bundle.object(forInfoDictionaryKey: \"LastFMSharedSecret\") as? String ?? \"\"\n"
+              "        )\n"
+              "        if built.isConfigured { return built }\n"
+              "        if let saved = LastFMLocalKeys.load() {\n"
+              "            return LastFMConfiguration(apiKey: saved.apiKey, sharedSecret: saved.secret)\n"
+              "        }\n"
+              "        return built\n"
+              "    }\n")
+
+          # Show the key form in Last.fm settings while no keys are available
+          patch('Sources/UI/Views/LastFMSettingsView.swift',
+              "                Link(\"Last.fm privacy policy\"",
+              "                if case .unavailable = integration.status {\n"
+              "                    LastFMKeyEntryView()\n"
+              "                }\n"
+              "\n"
+              "                Link(\"Last.fm privacy policy\"")
+          print("Last.fm key entry added.")
+          PY
+
       - name: Generate Xcode project
         run: xcodegen generate
 
