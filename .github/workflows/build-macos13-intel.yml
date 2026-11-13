@@ -54,11 +54,16 @@ jobs:
 
           // MARK: - onChange
 
+          private final class OnChangeActionBox<V> {
+              var action: (V, V) -> Void = { _, _ in }
+          }
+
           private struct OnChangeCompatModifier<V: Equatable>: ViewModifier {
               let value: V
               let initial: Bool
               let action: (V, V) -> Void
               @State private var previous: V
+              @State private var box = OnChangeActionBox<V>()
 
               init(value: V, initial: Bool, action: @escaping (V, V) -> Void) {
                   self.value = value
@@ -68,14 +73,18 @@ jobs:
               }
 
               func body(content: Content) -> some View {
-                  content
+                  // Always call the newest closure. The macOS 13 onChange can otherwise run an older copy
+                  // that still sees the previous values of the view (this showed the wrong artist's albums).
+                  self.box.action = action
+                  let actionBox = self.box
+                  return content
                       .onChange(of: value) { newValue in
                           let oldValue = previous
                           previous = newValue
-                          action(oldValue, newValue)
+                          actionBox.action(oldValue, newValue)
                       }
                       .onAppear {
-                          if initial { action(value, value) }
+                          if initial { actionBox.action(value, value) }
                       }
               }
           }
@@ -698,6 +707,38 @@ jobs:
               "\n"
               "                Link(\"Last.fm privacy policy\"")
           print("Last.fm key entry added.")
+          PY
+
+      - name: Remember the volume between launches
+        run: |
+          python3 - <<'PY'
+          def patch(path, old, new):
+              s = open(path).read()
+              assert s.count(old) == 1, "%s: anchor found %d times: %r" % (path, s.count(old), old[:70])
+              open(path, 'w').write(s.replace(old, new))
+
+          pc = 'Sources/Playback/PlaybackController.swift'
+          patch(pc,
+              "    @Published private(set) var volume: Float = 1.0\n",
+              "    @Published private(set) var volume: Float = PlaybackController.savedPlayerVolume\n")
+          patch(pc,
+              "    private var playerVolume: Float = 1.0\n",
+              "    private var playerVolume: Float = PlaybackController.savedPlayerVolume\n"
+              "\n"
+              "    /// The volume you left Moonlight at (80% the first time).\n"
+              "    private static var savedPlayerVolume: Float {\n"
+              "        if let saved = UserDefaults.standard.object(forKey: \"moonlightPlayerVolume\") as? Double {\n"
+              "            return Float(max(0, min(1, saved)))\n"
+              "        }\n"
+              "        return 0.8\n"
+              "    }\n")
+          patch(pc,
+              "            playerVolume = clampedVolume\n"
+              "            self.volume = clampedVolume\n",
+              "            playerVolume = clampedVolume\n"
+              "            UserDefaults.standard.set(Double(clampedVolume), forKey: \"moonlightPlayerVolume\")\n"
+              "            self.volume = clampedVolume\n")
+          print("Volume is now remembered.")
           PY
 
       - name: Generate Xcode project
