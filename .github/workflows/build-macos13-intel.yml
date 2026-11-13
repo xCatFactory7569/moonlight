@@ -427,26 +427,70 @@ jobs:
           print("Inspector panel hooked in.")
           PY
 
+      - name: Work around a songs-table crash on macOS 13
+        run: |
+          python3 - <<'PY'
+          import glob, re
+          # Passing a Set's "contains" function around crashed in the macOS 13 build.
+          # Use plain closures instead.
+          pattern = re.compile(r'\.(map|filter)\((\w+)\.contains\)')
+          total = 0
+          for f in glob.glob('Sources/**/*.swift', recursive=True):
+              if '/Mobile/' in f:
+                  continue
+              s = open(f).read()
+              new, n = pattern.subn(lambda m: '.%s { %s.contains($0) }' % (m.group(1), m.group(2)), s)
+              if n:
+                  open(f, 'w').write(new)
+                  total += n
+                  print("%s: %d" % (f, n))
+          assert total >= 5, "expected to patch at least 5 places, patched %d" % total
+          PY
+
       - name: Graphite palette (dark gray with black accents) for the Moonlight theme
         run: |
           python3 - <<'PY'
-          path = 'Sources/UI/DesignSystem.swift'
-          s = open(path).read()
-          old = (
+          import glob
+
+          def patch(path, old, new):
+              s = open(path).read()
+              assert s.count(old) == 1, "%s: anchor found %d times: %r" % (path, s.count(old), old[:70])
+              open(path, 'w').write(s.replace(old, new))
+
+          # Dark gray and black palette, with neutral (non-blue) highlights
+          patch('Sources/UI/DesignSystem.swift',
               '                bgBase: "#1f2329", bgContent: "#282c34", bgSidebar: "#21252b", bgSidebarOpacity: 0.72,\n'
               '                bgElevated: "#303640", bgElevated2: "#3b4250", bgChrome: "#2c313a", transportOpacity: 0.76,\n'
               '                hover: "#61afef", selected: "#61afef", accent: "#61afef", accentStrong: "#528bff",\n'
-              '                borderSoft: "#abb2bf", borderMedium: "#abb2bf", borderStrong: "#c8ccd4"\n'
-          )
-          new = (
+              '                borderSoft: "#abb2bf", borderMedium: "#abb2bf", borderStrong: "#c8ccd4"\n',
               '                bgBase: "#0e0e0f", bgContent: "#242426", bgSidebar: "#1a1a1c", bgSidebarOpacity: 0.72,\n'
               '                bgElevated: "#303033", bgElevated2: "#3b3b3f", bgChrome: "#111112", transportOpacity: 0.86,\n'
-              '                hover: "#61afef", selected: "#61afef", accent: "#61afef", accentStrong: "#528bff",\n'
-              '                borderSoft: "#c4c4c9", borderMedium: "#c4c4c9", borderStrong: "#dcdce0"\n'
-          )
-          assert s.count(old) == 1, "Moonlight palette not found (%d)" % s.count(old)
-          open(path, 'w').write(s.replace(old, new))
-          print("Graphite palette applied to the Moonlight theme.")
+              '                hover: "#a0a0a6", selected: "#a8a8ae", accent: "#c8c8cc", accentStrong: "#e6e6e9",\n'
+              '                borderSoft: "#c4c4c9", borderMedium: "#c4c4c9", borderStrong: "#dcdce0"\n')
+
+          # The sidebar sheen had a blue tint on dark themes
+          patch('Sources/UI/DesignSystem.swift',
+              'Color(hex: isLight ? "#ffffff" : "#cfd7ff")',
+              'Color(hex: "#ffffff")')
+
+          # Use the theme accent instead of the macOS system accent (blue by default)
+          count = 0
+          for f in glob.glob('Sources/**/*.swift', recursive=True):
+              if '/Mobile/' in f:
+                  continue
+              s = open(f).read()
+              if 'Color.accentColor' in s:
+                  count += s.count('Color.accentColor')
+                  open(f, 'w').write(s.replace('Color.accentColor', 'Color.dAccent'))
+          patch('Sources/UI/Views/ScanProgressBanner.swift', ': .accentColor))', ': Color.dAccent))')
+          print("Replaced %d system accent uses." % count)
+
+          # Tint standard controls (toggles, sliders, buttons) with the theme accent
+          patch('Sources/App/ContentView.swift',
+              '        .animation(.easeInOut(duration: 0.18), value: appState.isSidebarCollapsed)\n',
+              '        .animation(.easeInOut(duration: 0.18), value: appState.isSidebarCollapsed)\n'
+              '        .tint(Color.dAccent)\n')
+          print("Graphite palette applied.")
           PY
 
       - name: Generate Xcode project
